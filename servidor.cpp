@@ -4,6 +4,7 @@
 #include <Windows.h>
 #include <process.h>
 #include <time.h>
+#include <map>
 
 #pragma comment (lib, "Ws2_32.lib")
 
@@ -15,13 +16,15 @@
 #define FROM 20
 #define TO  20
 #define TAMANHO 5
-#define ALL_LEN 2048
-#define MESSAGE 2000
+#define ALL_LEN 20049
+#define MESSAGE 20000
 
 //void criaConexao(void *arg);
 void gerenciaConexao(void *arg);
 
 using namespace std;
+
+map<string, SOCKET> listaClientes;//map para relacionar nickname com SOCKET
 
 const string currentDateTime() {
 	time_t     now = time(0);
@@ -173,12 +176,40 @@ void gerenciaConexao(void *arg) {
 
 	recvVersion = recvBuffer.substr(0, VERSION);
 	recvType = recvBuffer.substr(VERSION, TYPE);
-	recvTo = recvBuffer.substr(VERSION + TYPE, TO);
-	recvFrom = recvBuffer.substr(VERSION + TYPE + TO, FROM);
-	recvTamanho = recvBuffer.substr(VERSION + TYPE + TO + FROM, TAMANHO);
-	recvMessage = recvBuffer.substr(VERSION + TYPE + TO + FROM + TAMANHO, recvBuffer.length()-VERSION - TYPE - TO - FROM - TAMANHO-1);
+	recvFrom = recvBuffer.substr(VERSION + TYPE, FROM);
+	//recvTo = recvBuffer.substr(VERSION + TYPE + FROM, TO);
+	//recvTamanho = recvBuffer.substr(VERSION + TYPE + TO + FROM, TAMANHO);
+	//recvMessage = recvBuffer.substr(VERSION + TYPE + TO + FROM + TAMANHO, recvBuffer.length()-VERSION - TYPE - TO - FROM - TAMANHO-1);
 	
 	printf("\nServidor - Type recebida: %s", recvType.c_str());
+	printf("\nServidor - Nickname recebido: %s", recvFrom.c_str());
+
+
+	//REG
+	if (recvType == "REG") {
+		version = "1";
+		type = "ACK";
+		message = "True";
+		
+		if (message.size() < MESSAGE) {
+			for (int i = message.size(); i <= MESSAGE; i++)
+				message += FILL_CHAR;
+		}
+		sendBuffer = version + type + from + to + tamanho + message;
+		printf("\n %s", sendBuffer);
+		iResult = send(ClientSocket, sendBuffer.c_str(), ALL_LEN, 0);
+		if (iResult == SOCKET_ERROR) {
+			printf("Send falhou: %d\n", WSAGetLastError());
+			closesocket(ClientSocket);
+			WSACleanup();
+			_endthread();
+		}
+			
+	}
+}
+		
+	
+
 	//printf("\nServidor - Comando recebido: %s", recvCommand.c_str());
 	/*
 	version.replace(0, VERSION, VER);
@@ -229,4 +260,3 @@ void gerenciaConexao(void *arg) {
 	closesocket(ClientSocket);
 	printf("\n\nConexao finalizada.");
 	*/
-}
