@@ -4,43 +4,159 @@
 #include <Windows.h>
 #include <process.h>
 #include <time.h>
+#include <map>
+#include <string>
+
 
 #pragma comment (lib, "Ws2_32.lib")
 
-#define PORT "40000"
+#define PORT "45000"
 #define VER "1"
-#define FILL_CHAR ' '
 #define VERSION 1
-#define COMMAND 5
-#define ALL_LEN 22
-#define MESSAGE 16
+#define TYPE 3
+#define FILL_CHAR ' '
+#define FROM 20
+#define TO  20
+#define TAMANHO 5
+#define ALL_LEN 20049
+#define MESSAGE 20000
 
-void criaConexao(void *arg);
+HANDLE mutex1;
+
+//void criaConexao(void *arg);
 void gerenciaConexao(void *arg);
 
 using namespace std;
 
-const string currentDateTime() {
-	time_t     now = time(0);
-	struct tm  tstruct;
-	char       buf[80];
-	tstruct = *localtime(&now);	
-	strftime(buf, sizeof(buf), "%d-%m-%Y %X", &tstruct);
-
-	return buf;
-}
+map<string, SOCKET> listaClientes;//map para relacionar nickname com SOCKET
+map<string, int>contLiv;
+map<string, int>::iterator ito;
+map<string, SOCKET>::iterator it;
 
 typedef struct parametros {
 	SOCKET ListenSocket;
 	SOCKET ClienteSocket;
 }PARAM;
 
+string getListaUsuarios() {
+
+	string listaDeUsuarios;
+	for (map<string, SOCKET>::iterator itu = listaClientes.begin(); itu != listaClientes.end(); ++itu) {
+		listaDeUsuarios = listaDeUsuarios + itu->first + ";";
+	}
+	return listaDeUsuarios;
+}
+
+void UPDAll(string sendBuffer) {
+	int iResult;
+	string aux;
+	for (map<string, SOCKET>::iterator itu = listaClientes.begin(); itu != listaClientes.end(); ++itu) {
+		aux = itu->first;
+		iResult = send(itu->second, sendBuffer.c_str(), ALL_LEN, 0);
+		if (iResult == SOCKET_ERROR) {
+			while (iResult == SOCKET_ERROR) {
+				if (listaClientes.find(aux) != listaClientes.end())
+					iResult = send(itu->second, sendBuffer.c_str(), ALL_LEN, 0);
+				else
+					break;
+			}
+		}
+	}
+
+}
+
+void desconectaUsuario(string nickname) {
+	closesocket(listaClientes[nickname]);
+
+	it = listaClientes.find(nickname);
+	if (it != listaClientes.end())
+		listaClientes.erase(it);
+
+	ito = contLiv.find(nickname);
+	if (ito != contLiv.end())
+		contLiv.erase(ito);
+	
+	printf("\nCliente desconectado: %s\n", nickname.c_str());
+	string sendBuffer(ALL_LEN, FILL_CHAR);
+
+	string version = "1";
+	sendBuffer.replace(0, VERSION, version);
+	string type = "UPD";
+	sendBuffer.replace(VERSION, TYPE, type);
+	string to(TO, FILL_CHAR);
+	string from(FROM, FILL_CHAR);
+	string tamanho(TAMANHO, FILL_CHAR);
+	string message(MESSAGE, FILL_CHAR);
+	message = getListaUsuarios();
+	int aux = message.size();
+	string tamanhoaux = to_string(aux);
+	sendBuffer.replace(VERSION + TYPE + FROM + TO, aux, tamanhoaux);
+	sendBuffer.replace(VERSION + TYPE + FROM + TO + TAMANHO, message.size(), message);
+	
+	UPDAll(sendBuffer);
+	_endthread();
+}
+
+void liv() {
+	char recvBuff[ALL_LEN] = {};
+	string sendBuffer(ALL_LEN, FILL_CHAR);
+	string recvBuffer(ALL_LEN, FILL_CHAR);
+	string version = "1";
+	sendBuffer.replace(0, VERSION, version);
+	string type = "LIV";
+	string recvType;
+	sendBuffer.replace(VERSION, TYPE, type);
+	string from(FROM, FILL_CHAR);
+	string nickname(TO, FILL_CHAR);
+	string tamanho(TAMANHO, FILL_CHAR);
+	string message(MESSAGE, FILL_CHAR);
+	string aux;
+	int iResult;
+
+	while (true) {
+		WaitForSingleObject(mutex1, INFINITE);
+		for (map<string, SOCKET>::iterator itu = listaClientes.begin(); itu != listaClientes.end(); ++itu) {
+			aux = (itu->first).c_str();
+			sendBuffer.replace(VERSION + TYPE + FROM, aux.size(), aux);
+			iResult = send(itu->second, sendBuffer.c_str(), ALL_LEN, 0);
+			iResult = recv(itu->second, recvBuff, ALL_LEN, 0);
+			if (iResult <= 0) {
+				//incrementa o contador;
+				contLiv[itu->first]++;
+			}
+			else {
+				recvBuffer = recvBuff;
+				//recvVersion = recvBuffer.substr(0, VERSION);
+				recvType = recvBuffer.substr(VERSION, TYPE);
+				if (recvType == "ACK") {//Clliente respondeu
+					contLiv[itu->first] = 0;
+					continue;//vai para o proximo cliente
+				}
+				else
+					contLiv[itu->first]++;;
+			}
+			if (contLiv[itu->first] >= 3) {//nao respondeu 3 vezes
+					desconectaUsuario(itu->first);
+					break;
+			}
+		}
+		//espera 30 segundos
+		ReleaseMutex(mutex1);
+		Sleep(30000);			
+	}
+		
+}
+
+
+
+
 int main() {
 	WSADATA wsaData;
 	int iResult;
 	PARAM par;
-	HANDLE Thread;
-	DWORD TName;
+	HANDLE Thread[10], ThreadLiv;
+	DWORD TName[10], TNameLiv;
+	int live = 0;
 
 	//inicializando o Winsock indicando a versão do Winsock
 	iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);//MAKEWORD(2,2) indica qual versão do Winsock está sendo utilizada
@@ -94,125 +210,196 @@ int main() {
 
 	freeaddrinfo(result);
 
-	//Chama a funcao para ouvir passando como parametro o comprimento máximo da fila.
-	Thread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)criaConexao, &par, 0, &TName);
-	
-	WaitForSingleObject(Thread,INFINITE);
+	//LISTEN
+	int lResult;
+	//HANDLE Thread;
+	//DWORD TName;
+	int i = 0;
+	printf("Aguardando conexoes...\n\n");
+	while (true) {
+		lResult = listen(ListenSocket, SOMAXCONN);
+		if (lResult == SOCKET_ERROR) {
+			printf("Listen falhou. Erro: %d\n", WSAGetLastError());
+			closesocket(ListenSocket);
+			WSACleanup();
+			//system("PAUSE");
+			break;
+		}
+
+		ClienteSocket = accept(ListenSocket, NULL, NULL);
+		printf("\nConexao iniciada.\n");
+
+		if (ClienteSocket == INVALID_SOCKET) {
+			printf("Accept falhou. Erro %d\n", WSAGetLastError());
+			closesocket(ListenSocket);
+			WSACleanup();
+			//system("PAUSE");
+			break;
+		}
+		else {
+			Thread[i] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)gerenciaConexao, &ClienteSocket, 0, &TName[i]);
+			i++;
+		}
+		//CHAMA THREAD
+		if(live == 0)
+			ThreadLiv = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)liv, NULL, 0, &TNameLiv);
+		live++;
+	}
+
 	return 0;
 }
 
-void criaConexao(void *arg) {
-	PARAM* par = (PARAM*)arg;
+void gerenciaConexao(void *arg) {
 
-	int iResult;
-	HANDLE Thread;
-	DWORD TName;
+	SOCKET *sock = (SOCKET*)arg;
+	SOCKET ClientSocket = *sock;
 
-	printf("Aguardando conexoes...\n\n");
-	while (true) {
-		iResult = listen(par->ListenSocket, SOMAXCONN);
-		if (iResult == SOCKET_ERROR) {
-			printf("Listen falhou. Erro: %d\n", WSAGetLastError());
-			closesocket(par->ListenSocket);
-			WSACleanup();
-			system("PAUSE");
-			break;
-		}
-
-		par->ClienteSocket = accept(par->ListenSocket, NULL, NULL);
-		printf("\nConexao iniciada.\n");
-		if (par->ClienteSocket == INVALID_SOCKET) {
-			printf("Accept falhou. Erro %d\n", WSAGetLastError());
-			closesocket(par->ListenSocket);
-			WSACleanup();
-			system("PAUSE");
-			break;
-		}
-		Thread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)gerenciaConexao, &par->ClienteSocket, 0, &TName);
-	}
-}
-
-void gerenciaConexao(void *arg) { 
-	SOCKET *sock = (SOCKET*)arg; 
-	SOCKET ClientSocket = *sock; 		
-	
-	string sendBuffer(ALL_LEN, FILL_CHAR); 
-	string version(VERSION, FILL_CHAR); 
-	string command(COMMAND, FILL_CHAR); 	
-	string message(MESSAGE, FILL_CHAR); 
-	string aux; 
+	string sendBuffer(ALL_LEN, FILL_CHAR);
+	string version(VERSION, FILL_CHAR);
+	string type(TYPE, FILL_CHAR);
+	string to(TO, FILL_CHAR);
+	string from(FROM, FILL_CHAR);
+	string tamanho(TAMANHO, FILL_CHAR);
+	string message(MESSAGE, FILL_CHAR);
+	string aux(ALL_LEN, FILL_CHAR);
 	string recvBuffer;
-	string recvVersion; 
-	string recvCommand; 
-	string recvMsglen; 
-	string recvMessage; 
+	string recvVersion;
+	string recvType;
+	string recvTo;
+	string recvFrom;
+	string recvTamanho;//Msglen
+	string recvMessage;
 	char recvBuff[ALL_LEN] = {};
 	char sendBuff[ALL_LEN] = {};
+
+
+	int iResult = 0;
 	
-	int iResult = recv(ClientSocket, recvBuff, ALL_LEN, 0);	
-	if (iResult <= 0) {
-		printf("Receive falhou. Erro: %d\n", WSAGetLastError());
-		closesocket(ClientSocket);
-		WSACleanup();
-		system("PAUSE");
-		_endthread();
-	}
-	
-	recvBuffer = recvBuff;
+	while (iResult = recv(ClientSocket, recvBuff, ALL_LEN, 0)) {
+		recvBuffer = recvBuff;
+		recvType = recvBuffer.substr(VERSION, TYPE);
+		/*
+		if (iResult <= 0) {
+			printf("Receive falhou. Erro: %d\n", WSAGetLastError());
+			closesocket(ClientSocket);
+			WSACleanup();
+			//system("PAUSE");
+			_endthread();
+		}
+		*/
+		if ((recvType == "REG" || recvType == "ERA" || recvType == "MEN")) {
+		//recvBuffer = recvBuff;
+		recvVersion = recvBuffer.substr(0, VERSION);
+		recvType = recvBuffer.substr(VERSION, TYPE);
+		recvFrom = recvBuffer.substr(VERSION + TYPE, FROM);
+		recvTo = recvBuffer.substr(VERSION + TYPE + FROM, TO);
+		recvTamanho = recvBuffer.substr(VERSION + TYPE + TO + FROM, TAMANHO);
+		recvMessage = recvBuffer.substr(VERSION + TYPE + TO + FROM + TAMANHO, recvBuffer.length() - VERSION - TYPE - TO - FROM - TAMANHO);
 
-	recvVersion = recvBuffer.substr(0,VERSION);	
-	recvCommand = recvBuffer.substr(VERSION, COMMAND);
-	recvMessage = recvBuffer.substr(VERSION + COMMAND, MESSAGE);
-	printf("\nServidor - Versao recebida: %s", recvVersion.substr(0,VERSION).c_str()); 
-	printf("\nServidor - Comando recebido: %s", recvCommand.substr(0,COMMAND).c_str());
+		printf("\nServidor - Type recebida: %s", recvType.c_str());
+		printf("\nServidor - Nickname recebido: %s", recvFrom.c_str());
+		/*
+		sendBuffer.replace(0, VERSION, version);
+		sendBuffer.replace(VERSION, VERSION + COMMAND, command);
+		sendBuffer.replace(VERSION + COMMAND, VERSION + COMMAND + MESSAGE, message);
+		*/
+		//REG
+		if (recvType == "REG") {
+			version = "1";
+			sendBuffer.replace(0, VERSION, version);
+			type = "ACK";
+			sendBuffer.replace(VERSION, TYPE, type);
+			//nickname já existe?
+			WaitForSingleObject(mutex1, INFINITE);
+			it = listaClientes.find(recvFrom);
+			if (it == listaClientes.end()) {
+				listaClientes[recvFrom] = ClientSocket; //insere nickname no map
+				contLiv[recvFrom] = 0; //inicializa o map do contLiv
+				//preenche o datagrama
+				ReleaseMutex(mutex1);
+				message = "TRUE";
+				sendBuffer.replace(VERSION + TYPE + FROM + TO + TAMANHO, message.size(), message);
 
-	version.replace(0, VERSION, VER);
-	command.replace(0, COMMAND, recvCommand);
-			
-	if (recvCommand.find("GET_H") != string::npos) {		
-		message = currentDateTime().substr(11,9);
-	}
-	else if (recvCommand.find("GET_D") != string::npos){
-		aux = currentDateTime();
-		message = aux.substr(0,6);		
-		message += aux.substr(8,2);		
-	}
-	else if(recvCommand.find("GET_A") != string::npos){	
-		aux = currentDateTime();
-		message = aux.substr(0,6);
-		message += aux.substr(8,2);
-		message += aux.substr(11,9);
-	}
-	else {
-		message = "\nInvalido ";		
-	}
+				iResult = send(ClientSocket, sendBuffer.c_str(), ALL_LEN, 0);
+				if (iResult == SOCKET_ERROR) {
+					while (iResult == SOCKET_ERROR) {
+						//if (listaClientes.find(aux) != listaClientes.end())
+						iResult = send(ClientSocket, sendBuffer.c_str(), ALL_LEN, 0);
+						//else
+						//	break;
+					}
+				}
+				//manda um UDP
+				type = "UPD";
+				sendBuffer.replace(VERSION, TYPE, type);
+				//pega todos os nicknames
+				WaitForSingleObject(mutex1, INFINITE);
+				message = getListaUsuarios();
+				ReleaseMutex(mutex1);
+				sendBuffer.replace(VERSION + TYPE + FROM + TO + TAMANHO, message.size(), message);
+				WaitForSingleObject(mutex1, INFINITE);
+				UPDAll(sendBuffer);
+				ReleaseMutex(mutex1);
+			}
+			else {//nickname já existe
+				message = "FALSE";
+				sendBuffer.replace(VERSION + TYPE + FROM + TO + TAMANHO, message.size(), message);
+				iResult = send(ClientSocket, sendBuffer.c_str(), ALL_LEN, 0);
+				if (iResult == SOCKET_ERROR) {
+					while (iResult == SOCKET_ERROR) {
+						iResult = send(ClientSocket, sendBuffer.c_str(), ALL_LEN, 0);
+					}
+				}
+			}
+		}
+		else if (recvType == "ERA") {
+			version = "1";
+			sendBuffer.replace(0, VERSION, version);
+			type = "ACK";
+			sendBuffer.replace(VERSION, TYPE, type);
+			tamanho = "4";
+			sendBuffer.replace(VERSION + TYPE + FROM + TO, tamanho.size(), tamanho);
+			message = "TRUE";
+			sendBuffer.replace(VERSION + TYPE + FROM + TO + TAMANHO, message.size(), message);
+			iResult = send(ClientSocket, sendBuffer.c_str(), ALL_LEN, 0);
+			if (iResult == SOCKET_ERROR) {
+				while (iResult == SOCKET_ERROR)
+					iResult = send(ClientSocket, sendBuffer.c_str(), ALL_LEN, 0);
+			}
+			//DESCONECTA O USUARIO
+			WaitForSingleObject(mutex1, INFINITE);
+			desconectaUsuario(recvFrom);
+			ReleaseMutex(mutex1);
+			WSACleanup();
+			_endthread();
+		}
+		else if (recvType == "MEN") {
+			version = "1";
+			sendBuffer.replace(0, VERSION, version);
+			type = "MEN";
+			sendBuffer.replace(VERSION, TYPE, type);
+			from = recvFrom;
+			sendBuffer.replace(VERSION + TYPE, from.size(), from);
+			to = recvTo;
+			sendBuffer.replace(VERSION + TYPE + FROM, to.size(), to);
+			tamanho = recvTamanho;
+			sendBuffer.replace(VERSION + TYPE + FROM + TO, tamanho.size(), tamanho);
+			message = recvMessage;
+			sendBuffer.replace(VERSION + TYPE + FROM + TO + TAMANHO, message.size(), message);
+			iResult = send(ClientSocket, sendBuffer.c_str(), ALL_LEN, 0);
+			if (iResult == SOCKET_ERROR) {
+				while (iResult == SOCKET_ERROR)
+					iResult = send(ClientSocket, sendBuffer.c_str(), ALL_LEN, 0);
 
-	if (message.size() < MESSAGE) {
-		for (int i = message.size(); i <= MESSAGE; i++)
-			message += FILL_CHAR;
-	}
+			}
+			printf("Troca de Mensagem entre %s e %s", from.c_str(), to.c_str());
 
-	sendBuffer.replace(0, VERSION, version);
-	sendBuffer.replace(VERSION, VERSION + COMMAND, command);
-	sendBuffer.replace(VERSION + COMMAND, VERSION + COMMAND + MESSAGE, message);
+		}
+		sendBuffer = aux;
+		}
 		
-
-	iResult = send(ClientSocket, sendBuffer.c_str(), ALL_LEN, 0);
-	if (iResult == SOCKET_ERROR) {
-		printf("Send falhou: %d\n", WSAGetLastError());
-		closesocket(ClientSocket);
-		WSACleanup();	
-		_endthread();
 	}
-
-	iResult = shutdown(ClientSocket, SD_SEND);
-	if (iResult == SOCKET_ERROR) {
-		printf("Shutdown falhou: %d\n", WSAGetLastError());
-		closesocket(ClientSocket);
-		WSACleanup();
-		_endthread();
-	}
-		
-	closesocket(ClientSocket);	
-	printf("\n\nConexao finalizada.");
+	printf("thread terminada com sucesso");
 }
+
+
